@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Per-branch preview: the Aspire app model, published as a Docker Compose file and run with plain
-# `docker compose` under the project name todo-<branch slug>.
+# Per-branch preview: the Aspire app model, published (`aspire publish`) as a Docker Compose file and run
+# with plain `docker compose` under the project name todo-<branch slug>.
 #
 #   scripts/preview up   [branch]   build from this worktree's current files, start, print the URL
 #   scripts/preview down [branch]   stop it and delete its containers, database and images
@@ -71,11 +71,27 @@ case "$cmd" in
     command -v aspire >/dev/null || { echo "aspire CLI not found (see README)" >&2; exit 1; }
     port="$(running_port)"; [ -n "$port" ] || port="$(choose_port)"
     warn_moved "$port"
-    # publish (Compose file from the app model) + build images + fill the .env; no `up` by Aspire
-    (cd "$root" && Preview__WebPort="$port" aspire do prepare-preview --apphost src/Todo.AppHost \
+    # 1. the Compose file, generated from the Aspire app model
+    mkdir -p "$outdir"
+    (cd "$root" && Preview__WebPort="$port" aspire publish --apphost src/Todo.AppHost \
         --output-path "$outdir" --non-interactive)
-    docker compose -p "$name" -f "$outdir/docker-compose.yaml" --env-file "$outdir/.env.Production" \
-        up --detach --remove-orphans
+    # 2. the two images, from this worktree's current files, tagged for this branch only
+    arch="$(uname -m)"; case "$arch" in aarch64|arm64) rid=linux-arm64 ;; *) rid=linux-x64 ;; esac
+    (cd "$root" && dotnet publish src/Todo.Api -c Release /t:PublishContainer \
+        -p:ContainerRepository="todo-api" -p:ContainerImageTag="$slug" \
+        -p:RuntimeIdentifier="$rid" -p:ContainerRuntimeIdentifier="$rid" -p:LocalRegistry=Docker)
+    docker build -t "todo-web:$slug" "$root/web"
+    # 3. the values the generated file asks for. The password is not a secret: this preview's database is
+    #    reachable only inside its Compose network. It is kept so a re-run matches the existing database.
+    [ -s "$outdir/postgres-password" ] || head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' > "$outdir/postgres-password"
+    cat > "$outdir/preview.env" <<EOF
+API_IMAGE=todo-api:$slug
+API_PORT=8080
+WEB_IMAGE=todo-web:$slug
+POSTGRES_PASSWORD=$(cat "$outdir/postgres-password")
+EOF
+    # 4. plain docker compose
+    docker compose -p "$name" -f "$outdir/docker-compose.yaml" --env-file "$outdir/preview.env" up --detach --remove-orphans
     echo "Waiting for the app to answer..."
     for _ in $(seq 1 90); do
       curl -fsS -o /dev/null "http://localhost:$port/api/todos" 2>/dev/null && { report "$port"; exit 0; }
