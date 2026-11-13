@@ -54,8 +54,9 @@ case "$cmd" in
     port="$(running_port)"; [ -n "$port" ] || port="$(choose_port)"
     export Preview__Name="$name" Preview__WebPort="$port"
     # Not a secret: the database is reachable only inside this preview's Compose network.
-    export "Parameters__postgres-password=$(printf '%s' "$name" | sha256sum | cut -c1-24)"
-    (cd "$root" && aspire deploy --apphost src/Todo.AppHost --non-interactive)
+    pgpass="$(printf '%s' "$name" | sha256sum | cut -c1-24)"
+    # (env is needed: the variable name contains a hyphen, which `export` rejects)
+    (cd "$root" && env "Parameters__postgres-password=$pgpass" aspire deploy --apphost src/Todo.AppHost --non-interactive)
     echo "Waiting for the app to answer..."
     for _ in $(seq 1 90); do
       curl -fsS -o /dev/null "http://localhost:$port/api/todos" 2>/dev/null && { report "$port"; exit 0; }
