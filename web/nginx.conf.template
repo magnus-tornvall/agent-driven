@@ -2,8 +2,20 @@ server {
     listen ${PORT};
     root /usr/share/nginx/html;
 
+    # nginx must not resolve the API's name only once at start: an API container that is recreated gets a new
+    # IP. With a variable in proxy_pass nginx asks this DNS server again (Docker's own resolver by default;
+    # set DNS_RESOLVER where the platform's is different).
+    resolver ${DNS_RESOLVER} valid=5s ipv6=off;
+
+    # Health belongs to the API and is checked inside the network (docker compose exec); at this URL it is
+    # not the SPA's index.html, which would answer 200 to any probe.
+    location ^~ /health {
+        return 404;
+    }
+
     location /api/ {
-        proxy_pass ${API_URL};
+        set $upstream ${API_URL};
+        proxy_pass $upstream;
         # The upstream gets its own host name, as Vite's changeOrigin does: behind a Host-routed ingress
         # (as in Azure) the API is addressed by its own name, not the browser's.
         proxy_set_header Host $proxy_host;

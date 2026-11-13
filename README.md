@@ -8,7 +8,14 @@ local dev loop around it (see the record in the issue for intent).
 Prerequisites: Docker, .NET SDK 10, Node 22+, and the [Aspire CLI](https://aspire.dev) **13.6.5**, which
 is the version the packages in this repo use. A CLI on another machine (for example the owner's Mac)
 must match it; `dotnet tool install Aspire.Cli --version 13.6.5 --tool-path ~/.local/aspire-cli`
-works where the install script is not reachable.
+works where the install script is not reachable. A CLI installed that way is not on `PATH`:
+
+```sh
+export PATH=$HOME/.local/aspire-cli:$PATH     # for aspire run / start / describe
+scripts/preview doctor                        # checks docker, dotnet, node and aspire are found
+```
+
+(`scripts/preview` itself also looks in `~/.local/aspire-cli`.)
 
 ```sh
 aspire run          # starts PostgreSQL, the API and the web app; prints the dashboard URL
@@ -85,7 +92,7 @@ its containers use. Base images (`node`, `nginx`) are pinned to exact versions i
 | `src/Todo.AppHost` | Aspire app model: PostgreSQL, API, web |
 | `src/Todo.Api` | ASP.NET Core minimal API. Knows the database only by the `ConnectionStrings__tododb` connection string; applies `Migrations/*.sql` itself on start |
 | `scripts/preview` | Per-branch preview (Compose) |
-| `scripts/check-loopback`, `scripts/test-web-image` | Checks: no project listener beyond loopback; nginx sends the upstream `Host` |
+| `scripts/check-loopback`, `scripts/check-pins`, `scripts/test-web-image` | Checks: no listener beyond loopback; no floating base images; the web image's nginx |
 | `web` | SolidJS + TypeScript (Vite). Forwards `/api` to `API_URL` (Vite in dev, nginx per `web/Dockerfile` in a preview) |
 | `tests/Todo.Api.Tests` | xUnit tests that start the real AppHost model (API + PostgreSQL, no web) |
 | `web/e2e` | Playwright browser tests against `BASE_URL` |
@@ -100,8 +107,30 @@ and recorded in `schema_migrations`. Never edit an applied file.
 
 ## Tests
 
+To verify a change, an agent runs both suites: `dotnet test` (API and database, through the real AppHost) and
+Playwright (the browser, against a running web URL).
+
 ```sh
-dotnet test tests/Todo.Api.Tests        # needs Docker; ~40 s
-cd web && npm ci && npx playwright install chromium
-BASE_URL=<web url from aspire describe> npx playwright test
+dotnet test tests/Todo.Api.Tests        # needs Docker; ~20 s; each test that changes the database has its own app
+
+cd web && npm ci
+npx playwright install chromium         # once per machine; skip if the browsers are already there
+BASE_URL=<web url> npx playwright test
 ```
+
+Playwright finds its browsers through `PLAYWRIGHT_BROWSERS_PATH`. In the sandbox VM they are installed at
+`/opt/ms-playwright` and the variable is already set (`export PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright`
+if yours is not); elsewhere `npx playwright install chromium` puts them in the default cache, and the
+variable need not be set.
+
+`BASE_URL` is the web app's URL, from one of:
+
+- the inner loop: `aspire describe` (the `web` row) after `aspire start`;
+- a preview: `scripts/preview up` (or `scripts/preview url`) prints it, e.g. `http://localhost:22835`.
+
+Other checks (no browser): `scripts/test-web-image` (the web image's nginx: upstream `Host`, `/health` is
+404, port, follows an API container that gets a new IP), `scripts/check-pins` (no floating base images),
+`scripts/check-loopback` (no project listener beyond loopback).
+
+At the preview URL `/health/...` is 404 on purpose: health is the API's and is read inside the network
+(`docker compose -p todo-<slug> exec web wget -S -O- http://api:8080/health/ready`).

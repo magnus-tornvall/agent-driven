@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Fails if a container base image in this repo floats (a tag that is not an exact version):
+#   web/Dockerfile FROM lines, the API's ContainerBaseImage, and the PostgreSQL image tag in the app model.
+set -uo pipefail
+root="$(git rev-parse --show-toplevel)"
+fail=0
+bad() { echo "FLOATING  $1" >&2; fail=1; }
+
+while read -r image; do
+  [[ "$image" =~ :[0-9]+\.[0-9]+\.[0-9]+ ]] && echo "pinned    $image" || bad "web/Dockerfile: FROM $image"
+done < <(awk '/^FROM /{print $2}' "$root/web/Dockerfile")
+
+base="$(sed -nE 's|.*<ContainerBaseImage>([^<]*)</ContainerBaseImage>.*|\1|p' "$root/src/Todo.Api/Todo.Api.csproj")"
+if [[ "$base" =~ :[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "pinned    $base"; else bad "Todo.Api.csproj: ContainerBaseImage '${base:-<unset: the SDK picks a floating tag>}'"; fi
+
+pg="$(sed -nE 's|.*postgres\.WithImageTag\("([^"]*)"\).*|\1|p' "$root/src/Todo.AppHost/AppHost.cs")"
+if [[ "$pg" =~ ^[0-9]+\.[0-9]+$ ]]; then echo "pinned    postgres:$pg"; else bad "AppHost.cs: postgres image tag '${pg:-<unset: Aspire default>}'"; fi
+
+[ "$fail" = 0 ] && echo "all pinned" || { echo "FAILED" >&2; exit 1; }

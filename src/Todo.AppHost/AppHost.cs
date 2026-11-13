@@ -8,6 +8,8 @@ builder.AddDockerComposeEnvironment("preview").WithDashboard(false);
 
 // Each AppHost run gets its own PostgreSQL (Decision 4).
 var postgres = builder.AddPostgres("postgres");
+// Exact image tag (Aspire's default would move with its version).
+postgres.WithImageTag("18.3");
 // Aspire creates the database itself only while running; a published Compose file would start Postgres
 // without it. The postgres image creates POSTGRES_DB on first start.
 if (builder.ExecutionContext.IsPublishMode) postgres.WithEnvironment("POSTGRES_DB", "tododb");

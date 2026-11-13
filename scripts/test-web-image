@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Checks the web image's nginx the way a Host-routed ingress would meet it: the upstream must receive its own
-# host name (as Vite's changeOrigin does in dev), not the browser's. Builds web/, starts a stand-in upstream that
-# answers with the Host header it received, calls it through the web container, and compares.
+# Checks the web image's nginx against a stand-in upstream (an nginx that answers with the Host header it got):
+#   1. the upstream receives its own host name (as Vite's changeOrigin does in dev), not the browser's;
+#   2. /health paths at the web URL are 404, not the SPA's index.html (API health is checked with compose exec);
+#   3. the image exposes the port nginx listens on (8000), and answers there without PORT being set;
+#   4. nginx follows the upstream to a new IP (an API container that was recreated), without a restart.
 set -euo pipefail
 root="$(git rev-parse --show-toplevel)"
 tag="todo-web-test-$$"; net="todo-web-test-$$"
-cleanup() { docker rm -f "$tag-web" "$tag-up" >/dev/null 2>&1 || true; docker network rm "$net" >/dev/null 2>&1 || true; docker image rm "$tag" >/dev/null 2>&1 || true; }
+cleanup() { docker rm -f "$tag-web" "$tag-up" "$tag-fill" "$tag-noport" >/dev/null 2>&1 || true; docker network rm "$net" >/dev/null 2>&1 || true; docker image rm "$tag" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 docker build -q -t "$tag" "$root/web" >/dev/null
 docker network create "$net" >/dev/null
@@ -15,6 +17,40 @@ docker run -d --name "$tag-web" --network "$net" -e PORT=8000 -e API_URL=http://
 port="$(docker port "$tag-web" 8000/tcp | head -1 | sed -E 's/.*://')"
 for _ in $(seq 1 30); do curl -fsS -o /dev/null "http://localhost:$port/api/x" 2>/dev/null && break; sleep 0.5; done
 got="$(curl -fsS "http://localhost:$port/api/x")"
-echo "browser host: localhost:$port   upstream saw Host: $got"
-[ "$got" = "upstream:8081" ] || { echo "FAIL: expected upstream to see Host 'upstream:8081'" >&2; exit 1; }
-echo "ok"
+fail=0
+check() { # check <description> <expected> <got>
+  if [ "$2" = "$3" ]; then echo "ok    $1"; else echo "FAIL  $1: expected '$2', got '$3'" >&2; fail=1; fi
+}
+
+got="$(curl -fsS "http://localhost:$port/api/x")"
+check "upstream sees its own Host (browser used localhost:$port)" "upstream:8081" "$got"
+
+check "/health/ready at the web URL" "404" "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$port/health/ready")"
+check "/health at the web URL" "404" "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$port/health")"
+check "an SPA route still gets index.html" "200" "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$port/some/route")"
+
+# (The nginx base image also exposes 80, which a Dockerfile cannot take back; nginx here listens on PORT only.)
+exposed="$(docker image inspect -f '{{range $p, $_ := .Config.ExposedPorts}}{{$p}} {{end}}' "$tag")"
+case " $exposed" in *" 8000/tcp "*) got=8000/tcp ;; *) got="$exposed" ;; esac
+check "8000/tcp is exposed" "8000/tcp" "$got"
+docker run -d --name "$tag-noport" --network "$net" -e API_URL=http://upstream:8081 -p 127.0.0.1:0:8000 "$tag" >/dev/null
+p2="$(docker port "$tag-noport" 8000/tcp | head -1 | sed -E 's/.*://')"
+for _ in $(seq 1 20); do curl -fsS -o /dev/null "http://localhost:$p2/" 2>/dev/null && break; sleep 0.5; done
+check "serves on 8000 with PORT unset" "200" "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$p2/")"
+docker rm -f "$tag-noport" >/dev/null
+
+# 4. Recreate the upstream with a different IP: a filler takes the freed address, so the new one differs.
+ip_of() { docker inspect -f "{{(index .NetworkSettings.Networks \"$net\").IPAddress}}" "$1"; }
+old_ip="$(ip_of "$tag-up")"
+docker rm -f "$tag-up" >/dev/null
+docker run -d --name "$tag-fill" --network "$net" nginx:1.27.5-alpine3.21 >/dev/null
+docker run -d --name "$tag-up" --network "$net" --network-alias upstream -v "$conf/default.conf:/etc/nginx/conf.d/default.conf:ro" nginx:1.27.5-alpine3.21 >/dev/null
+new_ip="$(ip_of "$tag-up")"
+[ "$old_ip" != "$new_ip" ] || { echo "FAIL  test setup: upstream kept its IP $old_ip" >&2; exit 1; }
+code=000
+for _ in $(seq 1 30); do   # nginx re-resolves every few seconds
+  code="$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$port/api/x")"; [ "$code" = 200 ] && break; sleep 1
+done
+check "/api works after the upstream moved from $old_ip to $new_ip" "200" "$code"
+
+[ "$fail" = 0 ] && echo "all ok" || { echo "FAILED" >&2; exit 1; }

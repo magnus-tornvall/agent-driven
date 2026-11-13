@@ -7,12 +7,24 @@
 #   scripts/preview url  [branch]   print the URL of a running preview
 #   scripts/preview status          list running previews
 #   scripts/preview plan [branch]   print the name and port a branch would get (changes nothing)
+#   scripts/preview doctor          check that the tools it needs are found (docker, dotnet, aspire)
 #
 # [branch] defaults to the current git branch. Everything listens on 127.0.0.1 only.
 #
 # After `up`, an agent needs nothing but docker compose with the project name that `plan` prints:
 #   docker compose -p todo-<slug> ps | logs api | stop postgres | start postgres | exec web ... | down --volumes
 set -euo pipefail
+
+# The Aspire CLI installed with `dotnet tool install --tool-path ~/.local/aspire-cli` is not on PATH by default;
+# look in the usual places before giving up (or put that directory on PATH yourself).
+find_aspire() {
+  command -v aspire >/dev/null 2>&1 && return 0
+  local d
+  for d in "$HOME/.local/aspire-cli" "$HOME/.aspire/bin"; do
+    [ -x "$d/aspire" ] && { PATH="$d:$PATH"; export PATH; return 0; }
+  done
+  return 1
+}
 
 cmd="${1:-}"; shift || true
 branch="${1:-$(git rev-parse --abbrev-ref HEAD)}"
@@ -65,10 +77,18 @@ case "$cmd" in
   url)
     p="$(running_port)"; [ -n "$p" ] || { echo "no running preview for '$branch'" >&2; exit 1; }
     report "$p" ;;
+  doctor)
+    ok=0
+    for t in docker dotnet node; do
+      if command -v "$t" >/dev/null 2>&1; then echo "found    $t: $(command -v "$t")"; else echo "MISSING  $t" >&2; ok=1; fi
+    done
+    if find_aspire; then echo "found    aspire: $(command -v aspire) ($(aspire --version 2>/dev/null | head -1))"; else echo "MISSING  aspire (not on PATH, not in ~/.local/aspire-cli)" >&2; ok=1; fi
+    docker info >/dev/null 2>&1 && echo "found    docker daemon" || { echo "MISSING  docker daemon access" >&2; ok=1; }
+    exit "$ok" ;;
   status)
     docker compose ls --filter name='^todo-' ;;
   up)
-    command -v aspire >/dev/null || { echo "aspire CLI not found (see README)" >&2; exit 1; }
+    find_aspire || { echo "aspire CLI not found: put it on PATH, e.g. export PATH=\$HOME/.local/aspire-cli:\$PATH (see README)" >&2; exit 1; }
     port="$(running_port)"; [ -n "$port" ] || port="$(choose_port)"
     warn_moved "$port"
     # 1. the Compose file, generated from the Aspire app model
