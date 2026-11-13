@@ -9,6 +9,25 @@ public static class Migrator
 {
     private const long LockKey = 7_261_001;
 
+    private static IEnumerable<string> EmbeddedNames() =>
+        Assembly.GetExecutingAssembly().GetManifestResourceNames().Where(n => n.EndsWith(".sql"))
+            .Select(res => res[(res.IndexOf("Migrations.", StringComparison.Ordinal) + "Migrations.".Length)..]);
+
+    /// True when every embedded migration is recorded as applied in the database as it is right now.
+    /// A recreated empty database (no schema_migrations table, or missing rows) is not current.
+    public static async Task<bool> IsCurrentAsync(NpgsqlDataSource db, CancellationToken ct)
+    {
+        await using var conn = await db.OpenConnectionAsync(ct);
+        await using var exists = new NpgsqlCommand("SELECT to_regclass('public.schema_migrations') IS NOT NULL", conn);
+        if (!(bool)(await exists.ExecuteScalarAsync(ct))!) return false;
+
+        var applied = new HashSet<string>();
+        await using var cmd = new NpgsqlCommand("SELECT name FROM schema_migrations", conn);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct)) applied.Add(r.GetString(0));
+        return EmbeddedNames().All(applied.Contains);
+    }
+
     public static async Task MigrateAsync(NpgsqlDataSource db, CancellationToken ct)
     {
         await using var conn = await db.OpenConnectionAsync(ct);

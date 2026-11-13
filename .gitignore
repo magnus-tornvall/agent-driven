@@ -155,3 +155,4 @@ test-results/
 
 # Aspire
 aspire-output/
+.preview/

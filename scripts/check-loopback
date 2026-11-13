@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Fail if any process of this project listens on a non-loopback address.
+
+Reads /proc/net/tcp{,6} and maps listening sockets to processes. Project processes are the ones whose
+command line matches PATTERN (default: Todo, vite, node, dotnet, docker-proxy, dcp, nginx).
+Usage: scripts/check-loopback [PATTERN]
+"""
+import glob, os, re, socket, struct, sys
+
+pattern = re.compile(sys.argv[1] if len(sys.argv) > 1 else r"Todo|vite|node|dotnet|docker-proxy|dcp|nginx")
+
+def addr(hexip, v6):
+    if not v6:
+        return socket.inet_ntoa(struct.pack("<I", int(hexip, 16)))
+    raw = bytes.fromhex(hexip)
+    return socket.inet_ntop(socket.AF_INET6, b"".join(raw[i:i + 4][::-1] for i in range(0, 16, 4)))
+
+def loopback(ip):
+    return ip.startswith("127.") or ip == "::1"
+
+listeners = {}   # inode -> (ip, port)
+for path, v6 in (("/proc/net/tcp", False), ("/proc/net/tcp6", True)):
+    with open(path) as f:
+        next(f)
+        for line in f:
+            p = line.split()
+            if p[3] != "0A":
+                continue
+            ip, port = p[1].split(":")
+            listeners[p[9]] = (addr(ip, v6), int(port, 16))
+
+owners = {}
+for fd in glob.glob("/proc/[0-9]*/fd/*"):
+    try:
+        t = os.readlink(fd)
+    except OSError:
+        continue
+    m = re.fullmatch(r"socket:\[(\d+)\]", t)
+    if m and m.group(1) in listeners:
+        pid = fd.split("/")[2]
+        try:
+            cmd = open(f"/proc/{pid}/cmdline").read().replace("\0", " ").strip()
+        except OSError:
+            cmd = "?"
+        owners.setdefault(m.group(1), (pid, cmd))
+
+bad = 0
+for inode, (ip, port) in sorted(listeners.items(), key=lambda kv: kv[1][1]):
+    if loopback(ip):
+        continue
+    pid, cmd = owners.get(inode, ("?", "?"))
+    mine = bool(pattern.search(cmd))
+    print(f"{'NOT LOOPBACK' if mine else 'other'}  {ip}:{port}  pid {pid}  {cmd[:110]}")
+    bad += mine
+print(f"{bad} project listener(s) on a non-loopback address")
+sys.exit(1 if bad else 0)

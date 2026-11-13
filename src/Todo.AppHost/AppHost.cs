@@ -1,4 +1,4 @@
-// ContainerTargetPlatform / WithContainerBuildOptions are marked evaluation-only in Aspire 13.4. They are the
+// ContainerTargetPlatform / WithContainerBuildOptions are marked evaluation-only in Aspire 13.6. They are the
 // only way to build preview images for this machine's architecture (the default is linux/amd64), so the
 // diagnostic is acknowledged for this file, and no other API is affected.
 #pragma warning disable ASPIREPIPELINES003
@@ -7,12 +7,11 @@ using System.Runtime.InteropServices;
 
 var builder = DistributedApplication.CreateBuilder(args);
 
-// `aspire deploy` turns this model into a Docker Compose file and runs it: that is the per-branch preview.
-// Preview:Name (env Preview__Name) names this preview's Compose project, images and port, so previews of
-// different branches can run side by side. See scripts/preview.
-var previewName = builder.Configuration["Preview:Name"] ?? "preview";
+// The per-branch preview is this model published as a Docker Compose file (scripts/preview runs
+// `aspire do prepare-preview`, then plain `docker compose -p todo-<branch>`). Preview:WebPort
+// (env Preview__WebPort) is the host port the preview's web container is published on.
 var previewPort = builder.Configuration["Preview:WebPort"];
-builder.AddDockerComposeEnvironment(previewName).WithDashboard(false);
+builder.AddDockerComposeEnvironment("preview").WithDashboard(false);
 
 // Preview images are built for the machine they run on (the default is linux/amd64).
 var platform = RuntimeInformation.OSArchitecture == Architecture.Arm64
@@ -29,6 +28,8 @@ var db = postgres.AddDatabase("tododb");
 var api = builder.AddProject<Projects.Todo_Api>("api")
     .WithReference(db)
     .WaitFor(db)
+    // Aspire assigns the HTTP port, so two runs never collide.
+    .WithHttpEndpoint()
     .WithHttpHealthCheck("/health/ready")
     .WithContainerBuildOptions(o => o.TargetPlatform = platform);
 
@@ -39,12 +40,14 @@ if (builder.Configuration["Todo:WithWeb"] != "false")
     builder.AddViteApp("web", "../../web")
         .WithEnvironment("API_URL", api.GetEndpoint("http"))
         .WaitFor(api)
+        // "External" only tells Aspire/Compose the endpoint is for outside callers. Nothing binds beyond
+        // loopback: Vite uses its default host, and the preview port is mapped to 127.0.0.1 above.
         .WithExternalHttpEndpoints()
         // In a preview the web container is built from web/Dockerfile (nginx: static files, /api forwarded to API_URL).
         .PublishAsDockerFile()
         .PublishAsDockerComposeService((_, service) =>
         {
-            // Publish on loopback only; the port is chosen per branch (nothing in the VM listens on 0.0.0.0).
+            // Published on loopback only (127.0.0.1); the host port is chosen per branch.
             service.Ports.Clear();
             service.Ports.Add($"127.0.0.1:{previewPort ?? ""}:8000");
         })

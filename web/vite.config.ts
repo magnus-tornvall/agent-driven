@@ -7,7 +7,7 @@ const api = process.env.API_URL ?? "http://localhost:5080";
 export default defineConfig({
   plugins: [solid()],
   server: {
-    host: true,
+    // Vite's default host (localhost): loopback only, never all interfaces.
     port: Number(process.env.PORT ?? 5173),
     proxy: { "/api": { target: api, changeOrigin: true } },
   },

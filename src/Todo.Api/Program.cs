@@ -8,7 +8,6 @@ var builder = WebApplication.CreateBuilder(args);
 // The only thing the API knows about the database: the connection string named "tododb"
 // (ConnectionStrings__tododb in the environment).
 builder.AddNpgsqlDataSource("tododb", configureSettings: s => s.DisableHealthChecks = true);
-builder.Services.AddSingleton<SchemaState>();
 builder.Services.AddHostedService<MigrationService>();
 builder.Services.AddHealthChecks().AddCheck<DatabaseHealthCheck>("database", tags: ["ready"]);
 
