@@ -6,6 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Aspire.Hosting.Docker" Version="13.4.0" />
     <PackageReference Include="Aspire.Hosting.PostgreSQL" Version="13.4.0" />
     <PackageReference Include="Aspire.Hosting.JavaScript" Version="13.4.0" />
     <ProjectReference Include="..\Todo.Api\Todo.Api.csproj" />
