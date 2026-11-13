@@ -152,3 +152,6 @@ TestResults/
 # Playwright
 playwright-report/
 test-results/
+
+# Aspire
+aspire-output/

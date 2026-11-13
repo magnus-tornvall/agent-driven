@@ -27,7 +27,14 @@ name="todo-$(slug_of "$branch")"
 
 # Port: derived from the branch name, so a branch keeps its port; probe upward if it is taken.
 port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
-running_port() { docker compose -p "$name" port web 8000 2>/dev/null | sed -E 's/.*://' || true; }
+# Aspire names the Compose project aspire-<environment name>-<hash>; find it by the environment name.
+project() {
+  docker ps -a --format '{{.Label "com.docker.compose.project"}}' | grep -E "^aspire-${name}-[0-9a-f]{8}\$" | sort -u | head -1 || true
+}
+running_port() {
+  local p; p="$(project)"; [ -n "$p" ] || return 0
+  docker compose -p "$p" port web 8000 2>/dev/null | sed -E 's/.*://' || true
+}
 choose_port() {
   local p
   p=$((20000 + 0x$(printf '%s' "$branch" | sha256sum | cut -c1-6) % 10000))
@@ -53,10 +60,7 @@ case "$cmd" in
     command -v aspire >/dev/null || { echo "aspire CLI not found (see README)" >&2; exit 1; }
     port="$(running_port)"; [ -n "$port" ] || port="$(choose_port)"
     export Preview__Name="$name" Preview__WebPort="$port"
-    # Not a secret: the database is reachable only inside this preview's Compose network.
-    pgpass="$(printf '%s' "$name" | sha256sum | cut -c1-24)"
-    # (env is needed: the variable name contains a hyphen, which `export` rejects)
-    (cd "$root" && env "Parameters__postgres-password=$pgpass" aspire deploy --apphost src/Todo.AppHost --non-interactive)
+    (cd "$root" && aspire deploy --apphost src/Todo.AppHost --non-interactive)
     echo "Waiting for the app to answer..."
     for _ in $(seq 1 90); do
       curl -fsS -o /dev/null "http://localhost:$port/api/todos" 2>/dev/null && { report "$port"; exit 0; }
@@ -64,8 +68,9 @@ case "$cmd" in
     done
     echo "preview '$name' did not answer on port $port within 180 s" >&2; exit 1 ;;
   down)
-    images="$(docker ps -a --filter "label=com.docker.compose.project=$name" --format '{{.Image}}' | sort -u)"
-    docker compose -p "$name" down --volumes --remove-orphans
+    proj="$(project)"; [ -n "$proj" ] || { echo "no preview '$name' to remove"; exit 0; }
+    images="$(docker ps -a --filter "label=com.docker.compose.project=$proj" --format '{{.Image}}' | sort -u)"
+    docker compose -p "$proj" down --volumes --remove-orphans
     # Images are removed too; ones still used by another preview refuse and are kept.
     for i in $images; do case "$i" in postgres*|*/postgres*) ;; *) docker image rm "$i" >/dev/null 2>&1 || true ;; esac; done
     echo "Preview '$name' removed." ;;

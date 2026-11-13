@@ -21,6 +21,9 @@ var platform = RuntimeInformation.OSArchitecture == Architecture.Arm64
 
 // Each AppHost run gets its own PostgreSQL (Decision 4).
 var postgres = builder.AddPostgres("postgres");
+// Aspire creates the database itself only while running; a published Compose file would start Postgres
+// without it. The postgres image creates POSTGRES_DB on first start.
+if (builder.ExecutionContext.IsPublishMode) postgres.WithEnvironment("POSTGRES_DB", "tododb");
 var db = postgres.AddDatabase("tododb");
 
 var api = builder.AddProject<Projects.Todo_Api>("api")
