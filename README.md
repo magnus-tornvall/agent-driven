@@ -49,6 +49,18 @@ side. `docker compose -p todo-<branch> stop postgres` / `start postgres` stops a
 database; the API's `/health/ready` follows it (inside the network:
 `docker compose -p todo-<branch> exec web wget -S -O- http://api:8080/health/ready`).
 
+Two previews side by side, and the browser checks for that (the second URL and a text that only its
+branch shows):
+
+```sh
+BASE_URL=http://localhost:<port A> OTHER_URL=http://localhost:<port B> CHANGE_TEXT="branch B" \
+  npx playwright test e2e/isolation.spec.ts      # from web/
+```
+
+Notes: Aspire names the Compose project `aspire-todo-<branch>-<hash>` (the script finds it); the
+database `tododb` is created by the postgres image (`POSTGRES_DB`, set only when publishing); `up`
+leaves earlier builds' images behind, `down` removes the ones its containers use.
+
 Preview images are built for the machine's own architecture. That uses an evaluation-only Aspire API
 (`ASPIREPIPELINES003`, acknowledged in `AppHost.cs`); without it Aspire builds `linux/amd64` images.
 
