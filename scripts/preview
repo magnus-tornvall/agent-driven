@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# Per-branch preview: the Aspire app model, published (`aspire publish`) as a Docker Compose file and run
+# with plain `docker compose` under the project name todo-<branch slug>.
+#
+#   scripts/preview up   [branch]   build from this worktree's current files, start, print the URL
+#   scripts/preview down [branch]   stop it and delete its containers, database and images
+#   scripts/preview url  [branch]   print the URL of a running preview
+#   scripts/preview status          list running previews
+#   scripts/preview plan [branch]   print the name and port a branch would get (changes nothing)
+#   scripts/preview doctor          check that the tools it needs are found (docker, dotnet, aspire)
+#
+# [branch] defaults to the current git branch. Everything listens on 127.0.0.1 only.
+#
+# After `up`, an agent needs nothing but docker compose with the project name that `plan` prints:
+#   docker compose -p todo-<slug> ps | logs api | stop postgres | start postgres | exec web ... | down --volumes
+set -euo pipefail
+
+# The Aspire CLI installed with `dotnet tool install --tool-path ~/.local/aspire-cli` is not on PATH by default;
+# look in the usual places before giving up (or put that directory on PATH yourself).
+find_aspire() {
+  command -v aspire >/dev/null 2>&1 && return 0
+  local d
+  for d in "$HOME/.local/aspire-cli" "$HOME/.aspire/bin"; do
+    [ -x "$d/aspire" ] && { PATH="$d:$PATH"; export PATH; return 0; }
+  done
+  return 1
+}
+
+cmd="${1:-}"; shift || true
+branch="${1:-$(git rev-parse --abbrev-ref HEAD)}"
+root="$(git rev-parse --show-toplevel)"
+ssh_host="${PREVIEW_SSH_HOST:-me}"
+
+# Name: todo-<slug of branch>. Slug is lowercase [a-z0-9-], at most 24 chars plus a short hash of
+# the full branch name when it had to be changed, so that different branches cannot collide.
+slug_of() {
+  local raw="$1" s h
+  s="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
+  h="$(printf '%s' "$raw" | sha256sum | cut -c1-6)"
+  if [ "$s" = "$raw" ] && [ "${#s}" -le 24 ]; then echo "$s"; else echo "${s:0:24}-$h" | sed -E 's/^-+//'; fi
+}
+slug="$(slug_of "$branch")"
+name="todo-$slug"
+outdir="$root/.preview/$slug"
+
+# Port: derived from the branch name, so a branch keeps its port. If that port is taken we probe
+# upward, and say so (see warn_moved): an `ssh -L` line made for the derived port would be wrong.
+derived_port() { echo $((20000 + 0x$(printf '%s' "$branch" | sha256sum | cut -c1-6) % 10000)); }
+port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+running_port() { docker compose -p "$name" port web 8000 2>/dev/null | sed -E 's/.*://' || true; }
+choose_port() {
+  local p; p="$(derived_port)"
+  while port_busy "$p"; do p=$((p + 1)); done
+  echo "$p"
+}
+warn_moved() {   # warn_moved <port actually used>
+  local d; d="$(derived_port)"
+  [ "$1" = "$d" ] && return 0
+  echo "!!! WARNING: the usual port $d for '$branch' is taken; this preview uses $1 instead." >&2
+  echo "!!! An ssh -L line or ssh config LocalForward made for $d will NOT reach this preview. Use:" >&2
+  echo "!!!   ssh -L $1:localhost:$1 $ssh_host" >&2
+}
+
+report() {
+  local port="$1"
+  warn_moved "$port"
+  echo "Preview '$branch' ($name): http://localhost:$port"
+  echo "From the Mac:  ssh -L $port:localhost:$port $ssh_host    then open http://localhost:$port"
+  echo "Inspect/stop:  docker compose -p $name ps | logs api | stop postgres | start postgres | down --volumes"
+}
+
+case "$cmd" in
+  plan)
+    p="$(running_port)"; [ -n "$p" ] || p="$(choose_port)"
+    echo "branch=$branch name=$name port=$p"
+    warn_moved "$p" ;;
+  url)
+    p="$(running_port)"; [ -n "$p" ] || { echo "no running preview for '$branch'" >&2; exit 1; }
+    report "$p" ;;
+  doctor)
+    ok=0
+    for t in docker dotnet node; do
+      if command -v "$t" >/dev/null 2>&1; then echo "found    $t: $(command -v "$t")"; else echo "MISSING  $t" >&2; ok=1; fi
+    done
+    if find_aspire; then echo "found    aspire: $(command -v aspire) ($(aspire --version 2>/dev/null | head -1))"; else echo "MISSING  aspire (not on PATH, not in ~/.local/aspire-cli)" >&2; ok=1; fi
+    docker info >/dev/null 2>&1 && echo "found    docker daemon" || { echo "MISSING  docker daemon access" >&2; ok=1; }
+    exit "$ok" ;;
+  status)
+    docker compose ls --filter name='^todo-' ;;
+  up)
+    find_aspire || { echo "aspire CLI not found: put it on PATH, e.g. export PATH=\$HOME/.local/aspire-cli:\$PATH (see README)" >&2; exit 1; }
+    port="$(running_port)"; [ -n "$port" ] || port="$(choose_port)"
+    warn_moved "$port"
+    # 1. the Compose file, generated from the Aspire app model
+    mkdir -p "$outdir"
+    (cd "$root" && Preview__WebPort="$port" aspire publish --apphost src/Todo.AppHost \
+        --output-path "$outdir" --non-interactive)
+    # 2. the two images, from this worktree's current files, tagged for this branch only
+    arch="$(uname -m)"; case "$arch" in aarch64|arm64) rid=linux-arm64 ;; *) rid=linux-x64 ;; esac
+    (cd "$root" && dotnet publish src/Todo.Api -c Release /t:PublishContainer \
+        -p:ContainerRepository="todo-api" -p:ContainerImageTag="$slug" \
+        -p:RuntimeIdentifier="$rid" -p:ContainerRuntimeIdentifier="$rid" -p:LocalRegistry=Docker)
+    docker build -t "todo-web:$slug" "$root/web"
+    # 3. the values the generated file asks for. The password is not a secret: this preview's database is
+    #    reachable only inside its Compose network. It is kept so a re-run matches the existing database.
+    [ -s "$outdir/postgres-password" ] || head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' > "$outdir/postgres-password"
+    cat > "$outdir/preview.env" <<EOF
+API_IMAGE=todo-api:$slug
+API_PORT=8080
+WEB_IMAGE=todo-web:$slug
+POSTGRES_PASSWORD=$(cat "$outdir/postgres-password")
+EOF
+    # 4. plain docker compose
+    docker compose -p "$name" -f "$outdir/docker-compose.yaml" --env-file "$outdir/preview.env" up --detach --remove-orphans
+    echo "Waiting for the app to answer..."
+    for _ in $(seq 1 90); do
+      curl -fsS -o /dev/null "http://localhost:$port/api/todos" 2>/dev/null && { report "$port"; exit 0; }
+      sleep 2
+    done
+    echo "preview '$name' did not answer on port $port within 180 s" >&2; exit 1 ;;
+  down)
+    images="$(docker ps -a --filter "label=com.docker.compose.project=$name" --format '{{.Image}}' | sort -u)"
+    docker compose -p "$name" down --volumes --remove-orphans
+    # Images are removed too; ones still used by another preview refuse and are kept.
+    for i in $images; do case "$i" in postgres*|*/postgres*) ;; *) docker image rm "$i" >/dev/null 2>&1 || true ;; esac; done
+    rm -rf "$outdir"
+    echo "Preview '$name' removed." ;;
+  *)
+    sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

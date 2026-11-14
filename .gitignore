@@ -141,3 +141,18 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# .NET
+bin/
+obj/
+*.user
+.vs/
+TestResults/
+
+# Playwright
+playwright-report/
+test-results/
+
+# Aspire
+aspire-output/
+.preview/
