@@ -58,10 +58,11 @@ is_running() { [ -n "$(docker compose -p "$name" ps --status running -q web 2>/d
 # else holds it; never takes another port.
 ensure_router() {
   docker network inspect "$router_net" >/dev/null 2>&1 || docker network create "$router_net" >/dev/null
-  docker build -q -t "$router_image" "$root/router" >/dev/null
+  # Image ids change on every build, so the config's own hash (a label) says whether the running router is current.
   local want have
-  want="$(docker image inspect -f '{{.Id}}' "$router_image")"
-  have="$(docker inspect -f '{{.Image}}' "$router_name" 2>/dev/null || true)"
+  want="$(cat "$root/router/Dockerfile" "$root/router/default.conf" | sha256sum | cut -c1-16)"
+  docker build -q -t "$router_image" --label "preview.router-config=$want" "$root/router" >/dev/null
+  have="$(docker inspect -f '{{index .Config.Labels "preview.router-config"}}' "$router_name" 2>/dev/null || true)"
   if [ "$have" = "$want" ] && [ "$(docker inspect -f '{{.State.Running}}' "$router_name")" = true ]; then return 0; fi
   docker rm -f "$router_name" >/dev/null 2>&1 || true
   if port_busy "$router_port"; then
