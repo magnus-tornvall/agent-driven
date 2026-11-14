@@ -6,10 +6,11 @@
 #   scripts/preview down [branch]   stop it and delete its containers, database and images
 #   scripts/preview url  [branch]   print the URL of a running preview
 #   scripts/preview status          list running previews
-#   scripts/preview plan [branch]   print the name and port a branch would get (changes nothing)
+#   scripts/preview plan [branch]   print the name and URL a branch would get (changes nothing)
 #   scripts/preview doctor          check that the tools it needs are found (docker, dotnet, aspire)
 #
-# [branch] defaults to the current git branch. Everything listens on 127.0.0.1 only.
+# [branch] defaults to the current git branch. Previews are reached at http://<slug>.localhost:8080 through one
+# router; it is the only listener, on 127.0.0.1.
 #
 # After `up`, an agent needs nothing but docker compose with the project name that `plan` prints:
 #   docker compose -p todo-<slug> ps | logs api | stop postgres | start postgres | exec web ... | down --volumes
@@ -43,40 +44,47 @@ slug="$(slug_of "$branch")"
 name="todo-$slug"
 outdir="$root/.preview/$slug"
 
-# Port: derived from the branch name, so a branch keeps its port. If that port is taken we probe
-# upward, and say so (see warn_moved): an `ssh -L` line made for the derived port would be wrong.
-derived_port() { echo $((20000 + 0x$(printf '%s' "$branch" | sha256sum | cut -c1-6) % 10000)); }
+# One router for all previews: the only listener, 127.0.0.1:$router_port. It reaches each preview's web container
+# by hostname, over the Docker network $router_net (see router/default.conf). A preview publishes no port.
+router_port=8080
+router_net=preview-router
+router_name=preview-router
+router_image=preview-router:local
+host="$slug.localhost:$router_port"
 port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
-running_port() { docker compose -p "$name" port web 8000 2>/dev/null | sed -E 's/.*://' || true; }
-choose_port() {
-  local p; p="$(derived_port)"
-  while port_busy "$p"; do p=$((p + 1)); done
-  echo "$p"
-}
-warn_moved() {   # warn_moved <port actually used>
-  local d; d="$(derived_port)"
-  [ "$1" = "$d" ] && return 0
-  echo "!!! WARNING: the usual port $d for '$branch' is taken; this preview uses $1 instead." >&2
-  echo "!!! An ssh -L line or ssh config LocalForward made for $d will NOT reach this preview. Use:" >&2
-  echo "!!!   ssh -L $1:localhost:$1 $ssh_host" >&2
+is_running() { [ -n "$(docker compose -p "$name" ps --status running -q web 2>/dev/null)" ]; }
+
+# Starts the router unless it is running with the current config. Fails, naming the port, if something
+# else holds it; never takes another port.
+ensure_router() {
+  docker network inspect "$router_net" >/dev/null 2>&1 || docker network create "$router_net" >/dev/null
+  # Image ids change on every build, so the config's own hash (a label) says whether the running router is current.
+  local want have
+  want="$(cat "$root/router/Dockerfile" "$root/router/default.conf" | sha256sum | cut -c1-16)"
+  docker build -q -t "$router_image" --label "preview.router-config=$want" "$root/router" >/dev/null
+  have="$(docker inspect -f '{{index .Config.Labels "preview.router-config"}}' "$router_name" 2>/dev/null || true)"
+  if [ "$have" = "$want" ] && [ "$(docker inspect -f '{{.State.Running}}' "$router_name")" = true ]; then return 0; fi
+  docker rm -f "$router_name" >/dev/null 2>&1 || true
+  if port_busy "$router_port"; then
+    echo "port $router_port on 127.0.0.1 is already taken, so the router cannot start. Free it; previews are reached only through $router_port, and no other port is tried." >&2
+    exit 1
+  fi
+  docker run -d --name "$router_name" --network "$router_net" --restart unless-stopped \
+    -p "127.0.0.1:$router_port:8080" "$router_image" >/dev/null
 }
 
 report() {
-  local port="$1"
-  warn_moved "$port"
-  echo "Preview '$branch' ($name): http://localhost:$port"
-  echo "From the Mac:  ssh -L $port:localhost:$port $ssh_host    then open http://localhost:$port"
+  echo "Preview '$branch' ($name): http://$host"
+  echo "From the Mac (once, for every preview):  ssh -L $router_port:localhost:$router_port $ssh_host    then open http://$host"
   echo "Inspect/stop:  docker compose -p $name ps | logs api | stop postgres | start postgres | down --volumes"
 }
 
 case "$cmd" in
   plan)
-    p="$(running_port)"; [ -n "$p" ] || p="$(choose_port)"
-    echo "branch=$branch name=$name port=$p"
-    warn_moved "$p" ;;
+    echo "branch=$branch name=$name url=http://$host" ;;
   url)
-    p="$(running_port)"; [ -n "$p" ] || { echo "no running preview for '$branch'" >&2; exit 1; }
-    report "$p" ;;
+    is_running || { echo "no running preview for '$branch'" >&2; exit 1; }
+    report ;;
   doctor)
     ok=0
     for t in docker dotnet node; do
@@ -89,11 +97,10 @@ case "$cmd" in
     docker compose ls --filter name='^todo-' ;;
   up)
     find_aspire || { echo "aspire CLI not found: put it on PATH, e.g. export PATH=\$HOME/.local/aspire-cli:\$PATH (see README)" >&2; exit 1; }
-    port="$(running_port)"; [ -n "$port" ] || port="$(choose_port)"
-    warn_moved "$port"
+    ensure_router      # first: fails before anything is built if port $router_port is taken
     # 1. the Compose file, generated from the Aspire app model
     mkdir -p "$outdir"
-    (cd "$root" && Preview__WebPort="$port" aspire publish --apphost src/Todo.AppHost \
+    (cd "$root" && aspire publish --apphost src/Todo.AppHost \
         --output-path "$outdir" --non-interactive)
     # 2. the two images, from this worktree's current files, tagged for this branch only
     arch="$(uname -m)"; case "$arch" in aarch64|arm64) rid=linux-arm64 ;; *) rid=linux-x64 ;; esac
@@ -110,20 +117,37 @@ API_PORT=8080
 WEB_IMAGE=todo-web:$slug
 POSTGRES_PASSWORD=$(cat "$outdir/postgres-password")
 EOF
+    # The web container joins the router's network under the alias todo-<slug>; the generated file is untouched.
+    cat > "$outdir/router.override.yaml" <<EOF
+services:
+  web:
+    networks:
+      default: {}
+      $router_net:
+        aliases: [todo-$slug]
+networks:
+  $router_net:
+    external: true
+EOF
     # 4. plain docker compose
-    docker compose -p "$name" -f "$outdir/docker-compose.yaml" --env-file "$outdir/preview.env" up --detach --remove-orphans
+    docker compose -p "$name" -f "$outdir/docker-compose.yaml" -f "$outdir/router.override.yaml" --env-file "$outdir/preview.env" up --detach --remove-orphans
     echo "Waiting for the app to answer..."
     for _ in $(seq 1 90); do
-      curl -fsS -o /dev/null "http://localhost:$port/api/todos" 2>/dev/null && { report "$port"; exit 0; }
+      curl -fsS -o /dev/null "http://$host/api/todos" 2>/dev/null && { report; exit 0; }
       sleep 2
     done
-    echo "preview '$name' did not answer on port $port within 180 s" >&2; exit 1 ;;
+    echo "preview '$name' did not answer at http://$host within 180 s" >&2; exit 1 ;;
   down)
     images="$(docker ps -a --filter "label=com.docker.compose.project=$name" --format '{{.Image}}' | sort -u)"
     docker compose -p "$name" down --volumes --remove-orphans
     # Images are removed too; ones still used by another preview refuse and are kept.
     for i in $images; do case "$i" in postgres*|*/postgres*) ;; *) docker image rm "$i" >/dev/null 2>&1 || true ;; esac; done
     rm -rf "$outdir"
+    # The router goes when the last preview does.
+    if [ -z "$(docker compose ls --filter name='^todo-' -q)" ]; then
+      docker rm -f "$router_name" >/dev/null 2>&1 || true
+      docker network rm "$router_net" >/dev/null 2>&1 || true
+    fi
     echo "Preview '$name' removed." ;;
   *)
     sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;

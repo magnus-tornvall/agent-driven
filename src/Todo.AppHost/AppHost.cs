@@ -2,8 +2,8 @@ var builder = DistributedApplication.CreateBuilder(args);
 
 // The per-branch preview is this model published as a Docker Compose file: scripts/preview runs
 // `aspire publish`, builds the two images, and starts the file with plain `docker compose -p todo-<branch>`.
-// Preview:WebPort (env Preview__WebPort) is the host port the preview's web container is published on.
-var previewPort = builder.Configuration["Preview:WebPort"];
+// A preview publishes no host port: the shared router (router/, started by scripts/preview) reaches its web
+// container by hostname over the Docker network.
 builder.AddDockerComposeEnvironment("preview").WithDashboard(false);
 
 // Each AppHost run gets its own PostgreSQL (Decision 4).
@@ -30,15 +30,14 @@ if (builder.Configuration["Todo:WithWeb"] != "false")
         .WithEnvironment("API_URL", api.GetEndpoint("http"))
         .WaitFor(api)
         // "External" only tells Aspire/Compose the endpoint is for outside callers. Nothing binds beyond
-        // loopback: Vite uses its default host, and the preview port is mapped to 127.0.0.1 above.
+        // loopback: Vite uses its default host, and a preview publishes no host port (see PublishAsDockerComposeService below).
         .WithExternalHttpEndpoints()
         // In a preview the web container is built from web/Dockerfile (nginx: static files, /api forwarded to API_URL).
         .PublishAsDockerFile()
         .PublishAsDockerComposeService((_, service) =>
         {
-            // Published on loopback only (127.0.0.1); the host port is chosen per branch.
+            // No host port at all (Compose would otherwise publish the external endpoint on every interface).
             service.Ports.Clear();
-            service.Ports.Add($"127.0.0.1:{previewPort ?? ""}:8000");
         });
 }
 

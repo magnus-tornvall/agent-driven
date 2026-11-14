@@ -32,12 +32,12 @@ interfaces (`scripts/check-loopback` lists any project listener that is not). Fr
 forward the port over SSH (here `me` is the SSH host name of the VM):
 
 ```sh
-ssh -L 8080:localhost:<web port> me      # then open http://localhost:8080
+ssh -L 8082:localhost:<web port> me      # then open http://localhost:8082
 ssh -L 8081:localhost:<dashboard port> me  # the Aspire dashboard (https, with the login token from aspire run)
 ```
 
 `aspire run` / `aspire describe` print the web and dashboard ports; they change each run.
-`scripts/preview up` prints its own ready-made `ssh -L` line.
+Port 8080 on the Mac is for previews only (see below); the inner loop uses other ports.
 
 ## Preview per branch
 
@@ -65,18 +65,28 @@ docker compose -p todo-<slug> exec web wget -S -O- http://api:8080/health/ready
 docker compose -p todo-<slug> down --volumes     # (scripts/preview down also removes the images)
 ```
 
-The URL port is derived from the branch name, so a branch keeps its port from run to run (one
-`LocalForward` line in `~/.ssh/config` per branch is enough). If that port is taken, `scripts/preview`
-takes the next free one and says so loudly with the corrected `ssh -L` line, because a line made for
-the usual port would then reach nothing, or another preview. Previews of different branches run side by
-side. The API's `/health/ready` follows the preview's database: 503 while it is stopped, and 200 again
-once it is back, also when it comes back empty (the API re-applies its migrations without a restart).
+Every preview is reached at `http://<slug>.localhost:8080` (`<slug>` is the part after `todo-` in the name
+`scripts/preview plan` prints), through one nginx router (`router/`) that `scripts/preview up` starts and
+`down` removes with the last preview. The router's `127.0.0.1:8080` is the only listener; a preview
+publishes no port. From the Mac, one forward serves every branch, set up once:
+
+```sh
+ssh -L 8080:localhost:8080 me      # then open http://<slug>.localhost:8080 in Chrome
+```
+
+If port 8080 is taken, `scripts/preview up` fails and names it; it never takes another port, because a forward
+made for 8080 would then show nothing, or the wrong branch. A hostname with no running preview (or one just
+torn down) gets a 404 page saying so, never another branch's app. Re-running `scripts/preview up` recreates a
+branch's containers and the same hostname serves the new build; the router is not restarted. Browsers other
+than Chrome are not checked for `*.localhost`. The API's `/health/ready` follows the preview's database: 503
+while it is stopped, and 200 again once it is back, also when it comes back empty (the API re-applies its
+migrations without a restart).
 
 Two previews side by side, and the browser checks for that (the second URL and a text that only its
 branch shows):
 
 ```sh
-BASE_URL=http://localhost:<port A> OTHER_URL=http://localhost:<port B> CHANGE_TEXT="branch B" \
+BASE_URL=http://<slug A>.localhost:8080 OTHER_URL=http://<slug B>.localhost:8080 CHANGE_TEXT="branch B" \
   npx playwright test e2e/isolation.spec.ts      # from web/
 ```
 
@@ -92,6 +102,7 @@ its containers use. Base images (`node`, `nginx`) are pinned to exact versions i
 | `src/Todo.AppHost` | Aspire app model: PostgreSQL, API, web |
 | `src/Todo.Api` | ASP.NET Core minimal API. Knows the database only by the `ConnectionStrings__tododb` connection string; applies `Migrations/*.sql` itself on start |
 | `scripts/preview` | Per-branch preview (Compose) |
+| `router` | nginx router: `<slug>.localhost:8080` to that preview's web container |
 | `scripts/check-loopback`, `scripts/check-pins`, `scripts/test-web-image` | Checks: no listener beyond loopback; no floating base images; the web image's nginx |
 | `web` | SolidJS + TypeScript (Vite). Forwards `/api` to `API_URL` (Vite in dev, nginx per `web/Dockerfile` in a preview) |
 | `tests/Todo.Api.Tests` | xUnit tests that start the real AppHost model (API + PostgreSQL, no web) |
@@ -126,10 +137,10 @@ variable need not be set.
 `BASE_URL` is the web app's URL, from one of:
 
 - the inner loop: `aspire describe` (the `web` row) after `aspire start`;
-- a preview: `scripts/preview up` (or `scripts/preview url`) prints it, e.g. `http://localhost:22835`.
+- a preview: `scripts/preview up` (or `scripts/preview url`) prints it, e.g. `http://my-branch.localhost:8080`.
 
 Other checks (no browser): `scripts/test-web-image` (the web image's nginx: upstream `Host`, `/health` is
-404, port, follows an API container that gets a new IP), `scripts/check-pins` (no floating base images),
+404, port, follows an API container that gets a new IP), `scripts/check-pins` (no floating base images, the router's included),
 `scripts/check-loopback` (no project listener beyond loopback).
 
 At the preview URL `/health/...` is 404 on purpose: health is the API's and is read inside the network
