@@ -30,7 +30,7 @@ if (builder.Configuration["Todo:WithWeb"] != "false")
         .WithEnvironment("API_URL", api.GetEndpoint("http"))
         .WaitFor(api)
         // "External" only tells Aspire/Compose the endpoint is for outside callers. Nothing binds beyond
-        // loopback: Vite uses its default host, and the preview port is mapped to 127.0.0.1 above.
+        // loopback: Vite uses its default host, and a preview publishes no host port (see PublishAsDockerComposeService below).
         .WithExternalHttpEndpoints()
         // In a preview the web container is built from web/Dockerfile (nginx: static files, /api forwarded to API_URL).
         .PublishAsDockerFile()
